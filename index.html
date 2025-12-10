@@ -162,7 +162,7 @@
         /* Mobile Adjustments */
         @media (max-width: 600px) {
             h1 { font-size: 32px; margin-top: 10px; letter-spacing: 2px; }
-            .control-btn { width: 32px; height: 32px; font-size: 14px; }
+            .control-btn { width: 36px; height: 36px; font-size: 16px; }
             .controls-wrapper { bottom: 20px; left: 20px; gap: 15px; }
             #footer-stats { 
                 width: 140px; right: 15px; bottom: 20px; 
@@ -333,6 +333,9 @@
         const _tempColor = new THREE.Color();
         const camBtn = document.getElementById('cam-btn');
         let isCameraRunning = false;
+        
+        // 新增：模型加载Promise追踪，用于静默预加载
+        let modelLoadPromise = null;
 
         async function init() {
             initThree();
@@ -355,6 +358,10 @@
             setTimeout(() => loader.remove(), 200);
 
             setTimeout(loadExternalScripts, 3000);
+            
+            // --- 关键优化：4秒后静默预加载模型，不影响开场动画 ---
+            // 这样当用户点击相机按钮时，模型可能已经加载完毕，实现秒开
+            setTimeout(preloadMediaPipe, 4000);
 
             animate();
         }
@@ -467,7 +474,7 @@
             
             // 3. 优化移动端相机距离，防止捏合时飞出屏幕
             // 移动端拉得更远 (75)，给照片展示留出空间
-            const initialZ = aspect < 1 ? 75 : 50; 
+            const initialZ = aspect < 1 ? 60 : 50; 
             const initialY = aspect < 1 ? 1.5 : 2; // 桌面端保持2.0，稍微下移视角
 
             camera.position.set(0, initialY, initialZ); 
@@ -750,20 +757,25 @@
                 let target = (mode === 'SCATTER') ? this.posScatter : this.posTree;
                 if (mode === 'FOCUS') {
                     if (this.mesh === focusTargetMesh) {
+                        // 1. 修复：移动端照片飞出屏幕问题
+                        // 动态计算目标位置，确保在相机前方且居中，适配横竖屏
                         let targetZ, targetY;
-                        
                         if (IS_MOBILE) {
                              // 修复：彻底解决飞出屏幕问题
                              // 强制固定在相机正前方固定距离，且高度与相机一致
                              const dist = 20; // 安全距离
                              targetZ = camera.position.z - dist; 
                              targetY = camera.position.y; // 垂直居中
+                             
+                             // 【修改这里】将 0 改为 -1.5 (向左偏移) 或其他负数
+                             // 如果觉得还是偏右，尝试 -2.0；如果偏左了，尝试 -1.0
+                             _tempVec3.set(-4, targetY, targetZ); 
                         } else {
                              targetZ = 35; // 桌面端保持原样
                              targetY = 2;
+                             // 桌面端保持不变
+                             _tempVec3.set(0, targetY, targetZ); 
                         }
-
-                        _tempVec3.set(0, targetY, targetZ); 
                         
                         // 使用逆矩阵抵消 mainGroup 的旋转，使物体在世界坐标系中看起来静止
                         const invMatrix = new THREE.Matrix4().copy(mainGroup.matrixWorld).invert();
@@ -811,7 +823,7 @@
                     // 3. 优化：桌面端恢复 index.html 的照片缩放比例 (4.5)
                     // 移动端因屏幕小，保持适配比例
                     if (this.mesh === focusTargetMesh) {
-                         s = IS_MOBILE ? 4.0 : 4.5; 
+                         s = IS_MOBILE ? 3.8 : 4.5; 
                     } else {
                          s = this.baseScale * 0.8; 
                     }
@@ -825,13 +837,28 @@
             const photos = particleSystem.filter(p => p.type === 'PHOTO');
             const count = photos.length;
             if (count === 0) return;
-            const h = CONFIG.particles.treeHeight * 0.9;
-            const bottomY = -h/2; const stepY = h / count; const loops = 3;
+            
+            // 优化：利用 85% 的树高，并在照片多于1张时均匀分布在区间首尾，最大化间距
+            const h = CONFIG.particles.treeHeight * 0.85;
+            const bottomY = -h/2; 
+            
             photos.forEach((p, i) => {
-                const y = bottomY + stepY * i + stepY/2;
-                const normalizedH = (y + h/2) / CONFIG.particles.treeHeight; 
-                const r = Math.max(1.0, CONFIG.particles.treeRadius * (1.0 - normalizedH)) + 3.0; 
+                let y;
+                if (count === 1) {
+                    y = 0; // 如果只有一张，居中
+                } else {
+                    // 如果有多张，从最底部到最顶部均匀分布
+                    y = bottomY + (h * (i / (count - 1)));
+                }
+
+                const normalizedH = (y + CONFIG.particles.treeHeight/2) / CONFIG.particles.treeHeight; 
+                // 调整半径公式，确保高处照片不会离树干太近
+                const r = Math.max(1.5, CONFIG.particles.treeRadius * (1.1 - normalizedH)) + 3.5; 
+                
+                // 使用 3.5 圈的螺旋，避免垂直方向上的照片排成直线
+                const loops = 3.5; 
                 const angle = normalizedH * Math.PI * 2 * loops + (Math.PI/4); 
+                
                 p.posTree.set(Math.cos(angle) * r, y, Math.sin(angle) * r);
             });
         }
@@ -1109,6 +1136,30 @@
                 });
             }
         }
+        
+        // --- 新增：独立模型预加载函数 ---
+        function preloadMediaPipe() {
+            // 如果已经在加载或加载完成，直接返回
+            if (handLandmarker || modelLoadPromise) return;
+            
+            // console.log("正在后台静默预加载手势模型...");
+            modelLoadPromise = FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm")
+                .then(vision => {
+                    return HandLandmarker.createFromOptions(vision, {
+                        baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`, delegate: "GPU" },
+                        runningMode: "VIDEO", numHands: 1, minHandDetectionConfidence: 0.7, minHandPresenceConfidence: 0.7, minTrackingConfidence: 0.7
+                    });
+                })
+                .then(hl => {
+                    handLandmarker = hl;
+                    modelLoadPromise = null; // 加载完成后清理 Promise
+                    // console.log("手势模型预加载完成");
+                })
+                .catch(err => {
+                    console.error("模型预加载失败:", err);
+                    modelLoadPromise = null;
+                });
+        }
 
         async function initMediaPipe() {
             if (isCameraRunning) return;
@@ -1133,16 +1184,21 @@
             }
 
             try {
-                if (!handLandmarker) {
-                     const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-                     handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                        baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`, delegate: "GPU" },
-                        runningMode: "VIDEO", numHands: 1, minHandDetectionConfidence: 0.7, minHandPresenceConfidence: 0.7, minTrackingConfidence: 0.7
-                    });
+                // 1. 立即启动相机请求 (UI线程第一优先级)
+                const cameraPromise = attemptAutoStart();
+
+                // 2. 检查模型状态：如果未预加载，则立即启动加载
+                // 如果已经预加载完成(handLandmarker存在)或正在加载(modelLoadPromise存在)，则跳过
+                if (!handLandmarker && !modelLoadPromise) {
+                     preloadMediaPipe(); 
                 }
 
-                let stream = await attemptAutoStart();
+                // 3. 等待相机流 (这是用户感知"打开速度"的关键，必须最快显示)
+                let stream = await cameraPromise;
                 if (stream) handleStreamSuccess(stream);
+
+                // 注意：这里不需要 await 模型加载完成。
+                // 视频流会立即显示，手势识别会在后台模型就绪后自动介入(见 predictWebcam 逻辑)。
 
             } catch(e) {
                 document.getElementById('cam-overlay').style.display = 'flex';
@@ -1230,6 +1286,7 @@
         async function predictWebcam() {
             if (video.currentTime !== lastVideoTime) {
                 lastVideoTime = video.currentTime;
+                // 只有当模型加载完毕后才开始预测，此前只显示视频流
                 if (handLandmarker) {
                     const result = handLandmarker.detectForVideo(video, performance.now());
                     processGestures(result);
@@ -1309,7 +1366,7 @@
                 
                 const aspect = window.innerWidth / window.innerHeight;
                 // 3. 修复：窗口调整时同样应用修正后的距离
-                const initialZ = aspect < 1 ? 75 : 50;
+                const initialZ = aspect < 1 ? 70 : 50;
                 camera.position.z = initialZ;
             });
             const fileInput = document.getElementById('file-input');
