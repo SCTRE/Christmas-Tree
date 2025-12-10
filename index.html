@@ -750,11 +750,22 @@
                 let target = (mode === 'SCATTER') ? this.posScatter : this.posTree;
                 if (mode === 'FOCUS') {
                     if (this.mesh === focusTargetMesh) {
-                        // 1. 修复：移动端照片飞出屏幕问题
-                        // 移动端 Camera Z = 75。照片应放置在相机前方一段距离 (如 Z=55)
-                        const distZ = IS_MOBILE ? 55 : 35; // 桌面端保持 35
-                        _tempVec3.set(0, 2, distZ); // Y 轴微调
+                        let targetZ, targetY;
                         
+                        if (IS_MOBILE) {
+                             // 修复：彻底解决飞出屏幕问题
+                             // 强制固定在相机正前方固定距离，且高度与相机一致
+                             const dist = 20; // 安全距离
+                             targetZ = camera.position.z - dist; 
+                             targetY = camera.position.y; // 垂直居中
+                        } else {
+                             targetZ = 35; // 桌面端保持原样
+                             targetY = 2;
+                        }
+
+                        _tempVec3.set(0, targetY, targetZ); 
+                        
+                        // 使用逆矩阵抵消 mainGroup 的旋转，使物体在世界坐标系中看起来静止
                         const invMatrix = new THREE.Matrix4().copy(mainGroup.matrixWorld).invert();
                         target = _tempVec3.applyMatrix4(invMatrix);
                     } else target = this.posScatter;
@@ -1348,7 +1359,8 @@
             }
             mainGroup.rotation.y = STATE.rotation.y;
             mainGroup.rotation.x = STATE.rotation.x;
-            
+            mainGroup.updateMatrixWorld(); // 关键修复：确保矩阵在粒子更新前是新的，防止抖动
+
             const len = particleSystem.length;
             for(let i=0; i<len; i++){
                 particleSystem[i].update(dt, STATE.mode, STATE.focusTarget);
