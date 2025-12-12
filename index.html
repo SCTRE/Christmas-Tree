@@ -1286,6 +1286,12 @@
         async function predictWebcam() {
             if (video.currentTime !== lastVideoTime) {
                 lastVideoTime = video.currentTime;
+                // 修复：确保video有尺寸，否则MediaPipe可能报错或坐标异常
+                if (video.videoWidth > 0 && video.width !== video.videoWidth) {
+                    video.width = video.videoWidth;
+                    video.height = video.videoHeight;
+                }
+                
                 // 只有当模型加载完毕后才开始预测，此前只显示视频流
                 if (handLandmarker) {
                     const result = handLandmarker.detectForVideo(video, performance.now());
@@ -1300,16 +1306,27 @@
                 STATE.hand.detected = true;
                 const lm = result.landmarks[0];
                 
-                const rawX = (lm[9].x - 0.5) * 2;
+                const wrist = lm[0]; const middleMCP = lm[9]; 
+                const handSize = Math.hypot(middleMCP.x - wrist.x, middleMCP.y - wrist.y);
+                
+                // 优化：降低手掌大小阈值 (0.05 -> 0.02)，适应移动端手臂伸远的情况
+                // 修复：如果手掌太小，明确设置为未检测到，避免卡在“检测到但return”的状态
+                if (handSize < 0.02) {
+                    STATE.hand.detected = false;
+                    return; 
+                }
+
+                // 优化：移动端镜像修正。
+                // 原始公式 (lm[9].x - 0.5) * 2 会导致手向左移(屏幕视觉左)，x变小，结果变小(负)，物体向左转。
+                // 但在前置摄像头镜像模式下，用户手向屏幕右边移动，MediaPipe得到的x其实是变小(因为相机是反的)。
+                // 为了让操作符合直觉（手往屏幕右边挥，物体往右转），需要反向计算。
+                const rawX = (0.5 - lm[9].x) * 2; // 反转 X 轴方向
                 const rawY = (lm[9].y - 0.5) * 2;
+                
                 STATE.hand.smoothX = THREE.MathUtils.lerp(STATE.hand.smoothX, rawX, 0.2); 
                 STATE.hand.smoothY = THREE.MathUtils.lerp(STATE.hand.smoothY, rawY, 0.2);
                 STATE.hand.x = STATE.hand.smoothX;
                 STATE.hand.y = STATE.hand.smoothY;
-
-                const wrist = lm[0]; const middleMCP = lm[9]; 
-                const handSize = Math.hypot(middleMCP.x - wrist.x, middleMCP.y - wrist.y);
-                if (handSize < 0.05) return; 
 
                 const tips = [lm[8], lm[12], lm[16], lm[20]];
                 let avgTipDist = 0; tips.forEach(t => avgTipDist += Math.hypot(t.x - wrist.x, t.y - wrist.y)); avgTipDist /= 4;
@@ -1317,14 +1334,14 @@
                 const extensionRatio = avgTipDist / handSize; 
                 const pinchRatio = pinchDist / handSize;
                 
-                if (extensionRatio < 1.3) { 
+                if (extensionRatio < 1.4) { // 稍微放宽握拳判定 (1.3 -> 1.4)
                     if (STATE.mode !== 'TREE') {
                         STATE.mode = 'TREE'; 
                         STATE.focusTarget = null;
                         STATE.rotation.x = 0; 
                     }
                 }
-                else if (pinchRatio < 0.35 && extensionRatio > 1.3) { 
+                else if (pinchRatio < 0.4 && extensionRatio > 1.3) { // 放宽捏合判定 (0.35 -> 0.4)
                     if (!STATE.hand.isPinching) {
                         STATE.hand.isPinching = true; 
                         
@@ -1343,11 +1360,11 @@
                         }
                     }
                 } 
-                else if (extensionRatio > 1.7) { 
+                else if (extensionRatio > 1.5) { // 显著放宽散开判定 (1.7 -> 1.5)，更容易触发
                     STATE.mode = 'SCATTER'; STATE.focusTarget = null; 
                     STATE.hand.isPinching = false; 
                 } else {
-                    if (pinchRatio > 0.4) {
+                    if (pinchRatio > 0.45) {
                         STATE.hand.isPinching = false;
                     }
                 }
